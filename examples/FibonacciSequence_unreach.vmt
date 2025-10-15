@@ -1,0 +1,35 @@
+(set-logic QF_LIA)
+
+; state vars and their next versions
+(declare-fun a () Int)
+(declare-fun a.next () Int)
+(declare-fun b () Int)
+(declare-fun b.next () Int)
+(declare-fun n () Int)
+(declare-fun n.next () Int)
+
+; link current ↔ next (VMT requires this :next annotation)
+(define-fun .a () Int (! a :next a.next))
+(define-fun .b () Int (! b :next b.next))
+(define-fun .n () Int (! n :next n.next))
+
+; initial states: n = 0, a = 1, b = 1
+(define-fun .init0 () Bool (! (= .n 0) :init ))
+(define-fun .init1 () Bool (! (= .a 1) :init ))
+(define-fun .init2 () Bool (! (= .b 1) :init ))
+
+; transition relation: n' = n+1, a' = a+b, b' = a
+(define-fun .tr0 () Bool (! (= n.next (+ .n 1)) :trans ))
+(define-fun .tr1 () Bool (! (= a.next (+ .a .b)) :trans ))
+(define-fun .tr2 () Bool (! (= b.next .a) :trans ))
+
+; optional invariants from your :inv block
+(define-fun .p_nonneg_a () Bool (! (>= .a 0) :invar-property 1))
+(define-fun .p_nonneg_b () Bool (! (>= .b 0) :invar-property 2))
+(define-fun .p_nonneg_n () Bool (! (>= .n 0) :invar-property 3))
+
+; main property (prove):  (=> (> n 2) (>= a (n+2)))
+; this is equivalent to checking reachability of its negation
+(define-fun .p0 () Bool (! (=> (> .n 2) (>= .a (+ .n 2))) :invar-property 0))
+
+(assert true)

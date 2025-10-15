@@ -1,0 +1,10 @@
+(set-logic QF_LIA)
+(define-system main 
+   :local ((a Int) (b Int) (n Int)) 
+   :init (and (= n 0) (= a 1) (= b 1)) 
+   :trans (and (= n' (+ n 1)) (= a' (+ a b)) (= b' a))
+   :inv (and (>= a 0) (>= b 0) (>= n 0)))
+(check-system main 
+   :local ((a Int) (b Int) (n Int)) 
+   :reachable (rch_1 (not (=> (> n 2) (>= a (+ n 3)))))
+   :query (qry_rch_1 (rch_1)))
