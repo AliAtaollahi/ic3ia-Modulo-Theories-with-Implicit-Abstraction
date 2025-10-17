@@ -137,6 +137,7 @@ bool Refiner::refine(const std::vector<TermList> &cex)
     msat_reset_env(solver_);
     preds_.clear();
     groups_.clear();
+    group_desc_.clear(); // <-- DEBUG: clear saved descriptions
 
     if (!MSAT_ERROR_ENV(model_solver_)) {
         msat_destroy_env(model_solver_);
@@ -161,6 +162,18 @@ bool Refiner::refine(const std::vector<TermList> &cex)
             formula = msat_make_and(solver_, formula,
                                     un_.at_time(ts_.trans(), k));
         }
+
+        // ---- DEBUG: build a readable description for this group ----
+        std::ostringstream gdbg;
+        gdbg << "group " << k << ": S@" << k << " = " << logterm(solver_, s);
+        if (k != cex.size()-1) {
+            msat_term trk = un_.at_time(ts_.trans(), k);
+            gdbg << "  |  T@" << k << " = " << logterm(solver_, trk);
+            formula = msat_make_and(solver_, formula, trk);
+        }
+        group_desc_.push_back(gdbg.str());
+        // ------------------------------------------------------------
+
         msat_assert_formula(solver_, simplify(formula, k));
         logger(3) << "abstract state " << k << ": " << logterm(solver_, s)
                   << endlog;
@@ -215,6 +228,19 @@ void Refiner::extract_predicates(msat_env env)
     preds_.clear();
 
     for (size_t i = 1; i < groups_.size(); ++i) {
+        // ---- DEBUG: show the exact clauses used for I_i ----
+        logger(3) << "I_" << i
+                  << " A-prefix uses groups [0.." << (i-1) << "]" << endlog;
+        for (size_t g = 0; g < i; ++g) {
+            logger(3) << "  " << group_desc_[g] << endlog;
+        }
+        logger(3) << "I_" << i
+                  << " B-suffix uses groups [" << i << ".."
+                  << (groups_.size()-1) << "]" << endlog;
+        for (size_t g = i; g < groups_.size(); ++g) {
+            logger(3) << "  " << group_desc_[g] << endlog;
+        }
+        // -----------------------------------------------------
         msat_term t = msat_get_interpolant(env, &groups_[0], i);
         if (!MSAT_ERROR_TERM(t)) {
             logger(3) << "got interpolant " << i << ": " << logterm(env, t)

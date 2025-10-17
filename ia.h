@@ -152,6 +152,9 @@ private:
 
     TermList to_protect_;
     ///< helper for simplify()
+
+    // === DEBUG: textual description for each interpolation group ===
+    std::vector<std::string> group_desc_;
 };
 
 } // namespace ic3ia

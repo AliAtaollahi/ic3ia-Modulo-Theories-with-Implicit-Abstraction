@@ -95,7 +95,8 @@ void IC3::set_initial_predicates(const TermList &preds)
 
 msat_truth_value IC3::prove()
 {
-    int iteration = 0;
+    int outer_iteration = 0;
+    int inner_iteration = 0;
     TimeKeeper t(prove_time_);
     initialize();
     if (!check_init()) {
@@ -108,11 +109,16 @@ msat_truth_value IC3::prove()
 
     while (true) {
         Cube bad;
-        logger(1) << "=======================\n\titeration "
-            << iteration
+        logger(1) << "=======================\n\touter_iteration "
+            << outer_iteration
             <<"\n=======================\n";
-        iteration++;
+        outer_iteration++;
+        inner_iteration = 0;
         while (get_bad(bad)) {
+            logger(1) << "=======================\n\tinner_iteration "
+                << inner_iteration
+                <<"\n=======================\n";
+            inner_iteration++;
             logger(1) << "==> before msat_truth_value s = rec_block(bad);" << endlog;
             msat_truth_value s = rec_block(bad);
             logger(1) << "==> after msat_truth_value s = rec_block(bad);" << endlog;
@@ -272,19 +278,20 @@ inline void IC3::generalize_bad(Cube &c)
 }
 
 
+// ic3.cpp  (UPDATED rec_block only)
+
+// --- in msat_truth_value IC3::rec_block(const Cube &bad) (ic3.cpp) ---
+
 msat_truth_value IC3::rec_block(const Cube &bad)
 {
     TimeKeeper t(rec_block_time_);
 
-    // We keep an estimated queue size for logging (ProofQueue has no size()).
     size_t qsize_est = 0;
 
     auto tv2str = [](msat_truth_value s) {
-        switch (s) {
-        case MSAT_TRUE:  return "MSAT_TRUE";
-        case MSAT_FALSE: return "MSAT_FALSE";
-        default:         return "MSAT_UNDEF";
-        }
+        switch (s) { case MSAT_TRUE: return "MSAT_TRUE";
+                     case MSAT_FALSE: return "MSAT_FALSE";
+                     default: return "MSAT_UNDEF"; }
     };
 
     auto chain_len = [](const ProofObligation *p) {
@@ -292,7 +299,6 @@ msat_truth_value IC3::rec_block(const Cube &bad)
     };
 
     auto syntactic_blocking_frame = [&](const Cube &c, unsigned int from_idx)->int {
-        // Try to find the *first* frame at/after from_idx whose cube subsumes c
         for (size_t i = from_idx; i < frames_.size(); ++i) {
             Frame &f = frames_[i];
             for (size_t j = 0; j < f.size(); ++j) {
@@ -310,15 +316,34 @@ msat_truth_value IC3::rec_block(const Cube &bad)
     qsize_est = 1;
 
     while (!queue.empty()) {
-        // periodically reset the solver -- clean up "garbage"
-        // (e.g. subsumed/learned clauses, bad variable scores...)
+        // >>> ADDED: full queue dump (top..bottom) at loop entry <<<
+        if (get_verbosity() >= 4) {
+            auto snap = queue.snapshot();
+            logger(4) << "[rec_block] queue dump (top..bottom)"
+                      << "  size_est=" << qsize_est
+                      << "  real_size=" << snap.size()
+                      << endlog;
+            for (size_t i = 0; i < snap.size(); ++i) {
+                const ProofObligation *qpo = snap[i];
+                logger(4) << "  [" << i << "]"
+                          << " idx=" << qpo->idx
+                          << " cube_size=" << qpo->cube.size()
+                          << " chain_len=" << chain_len(qpo)
+                          << "  cube=";
+                logcube(4, qpo->cube);
+                logger(4) << endlog;
+            }
+        }
+        // <<< END ADDED >>>
+
+        // periodically reset the solver...
         if (opts_.solver_reset_interval &&
             num_solve_calls_ - last_reset_calls_ > opts_.solver_reset_interval) {
             logger(3) << "[rec_block] solver reset threshold hit: "
                       << "num_solve_calls=" << num_solve_calls_
                       << " last_reset_calls=" << last_reset_calls_
                       << " interval=" << opts_.solver_reset_interval << endlog;
-            reset_solver(); // this already logs internally
+            reset_solver();
         }
 
         ProofObligation *p = queue.top();
@@ -330,9 +355,7 @@ msat_truth_value IC3::rec_block(const Cube &bad)
         logcube(4, p->cube);
         logger(3) << endlog;
 
-        // ------------------------------------------------------------
-        // Reached initial states: build a concrete/spurious trace decision
-        // ------------------------------------------------------------
+        // ---- frame 0 case (unchanged) ----
         if (p->idx == 0) {
             std::vector<TermList> cex;
             const ProofObligation *q = p;
@@ -353,20 +376,21 @@ msat_truth_value IC3::rec_block(const Cube &bad)
                       << tv2str(s) << endlog;
 
             if (s == MSAT_TRUE) {
-                // successful refinement => clear the queue (see original comment)
                 logger(3) << "[rec_block] refinement succeeded; "
                           << "clearing pending proof obligations" << endlog;
-                while (!queue.empty()) {
-                    queue.pop();
-                }
+                while (!queue.empty()) { queue.pop(); }
                 qsize_est = 0;
+
+                // >>> ADDED: show queue is now empty <<<
+                if (get_verbosity() >= 4) {
+                    logger(4) << "[rec_block] queue dump (after refine): empty" << endlog;
+                }
+                // <<< END ADDED >>>
             }
             return s;
         }
 
-        // ------------------------------------------------------------
-        // Normal step: try blocking if not already blocked
-        // ------------------------------------------------------------
+        // ---- normal step (unchanged logic; minor logs only) ----
         if (!is_blocked(p->cube, p->idx)) {
             logger(3) << "[rec_block] is_blocked = false; "
                       << "attempting relative induction:  ~C & F[" << (p->idx-1)
@@ -376,15 +400,12 @@ msat_truth_value IC3::rec_block(const Cube &bad)
             bool ok = block(p->cube, p->idx, &c, /*compute_cti=*/true);
 
             if (ok) {
-                // Successfully blocked (UNSAT): c is inductive relative to F[idx-1]
                 logger(3) << "[rec_block] block => UNSAT. "
                           << "inductive subcube size=" << c.size()
                           << " rel. to F[" << (p->idx-1) << "], c=";
-                logcube(4, c);
-                logger(3) << endlog;
+                logcube(4, c); logger(3) << endlog;
 
-                unsigned int idx = p->idx;
-                unsigned int before_idx = idx;
+                unsigned int idx = p->idx, before_idx = idx;
                 size_t before_size = c.size();
 
                 logger(3) << "[rec_block] generalize_and_push: "
@@ -397,10 +418,8 @@ msat_truth_value IC3::rec_block(const Cube &bad)
                           << " (delta_idx=" << (int(idx)-int(before_idx)) << ")"
                           << endlog;
 
-                // add c to frames up to idx
                 add_blocked(c, idx);
 
-                // Optimization: schedule same PO later if not at frontier
                 if (idx < depth() && !opts_.stack) {
                     logger(3) << "[rec_block] scheduling same PO at later step: "
                               << "from idx=" << p->idx << " to idx=" << (p->idx+1)
@@ -414,24 +433,19 @@ msat_truth_value IC3::rec_block(const Cube &bad)
                               << endlog;
                 }
 
-                // current top is handled: pop it
                 queue.pop();
                 --qsize_est;
             } else {
-                // Failed to block (SAT): we got a predecessor CTI in 'c'
                 logger(3) << "[rec_block] block => SAT. "
                           << "CTI predecessor size=" << c.size() << " : ";
-                logcube(4, c);
-                logger(3) << endlog;
+                logcube(4, c); logger(3) << endlog;
 
-                // schedule predecessor one step earlier in the trace
                 logger(3) << "[rec_block] pushing predecessor as new obligation "
                           << "at idx=" << (p->idx-1) << endlog;
                 queue.push_new(c, p->idx-1, p);
                 ++qsize_est;
             }
         } else {
-            // Already blocked: tell *where* syntactically (if possible)
             int where = syntactic_blocking_frame(p->cube, p->idx);
             if (where >= 0) {
                 logger(3) << "[rec_block] is_blocked = true; "
@@ -446,6 +460,12 @@ msat_truth_value IC3::rec_block(const Cube &bad)
             --qsize_est;
         }
     }
+
+    // >>> ADDED: explicit confirmation the queue is empty when we exit the loop <<<
+    if (get_verbosity() >= 4) {
+        logger(4) << "[rec_block] queue dump (after loop): empty" << endlog;
+    }
+    // <<< END ADDED >>>
 
     logger(2) << "[rec_block] done: queue empty, returning MSAT_TRUE" << endlog;
     return MSAT_TRUE;
@@ -618,91 +638,122 @@ bool IC3::block(const Cube &c, unsigned int idx, Cube *out, bool compute_cti)
 {
     TimeKeeper t(block_time_);
     ++num_block_;
-    
     assert(idx > 0);
 
-    // check whether ~c is inductive relative to F[idx-1], i.e.
-    // ~c & F[idx-1] & T |= ~c', that is
-    // solve(~c & F[idx-1] & T & c') is unsat
+    logger(2) << "================================================================================" << endlog;
+    logger(2) << "[block] ENTER  idx=" << idx
+              << "  compute_cti=" << (compute_cti ? "true" : "false")
+              << "  depth=" << depth()
+              << "  |c|=" << c.size() << endlog;
 
-    // activate T and F[idx-1]
+    logger(2) << "[block] input cube: ";
+    logcube(2, c); logger(2) << endlog;
+
+    // activate F[idx-1] & T
+    logger(3) << "[block] activate_frame(" << (idx-1) << "), activate_trans()" << endlog;
     activate_frame(idx-1);
     activate_trans();
 
-    // assume c'
+    // c' (primed) in the same order as c
     Cube primed = get_next(c);
-    if (opts_.seed) {
-        std::vector<size_t> idx(primed.size());
-        std::iota(idx.begin(), idx.end(), 0);
-        shuffle(idx, rng_);
-
-        for (size_t i : idx) {
-            solver_.assume(primed[i]);
-        }
-    } else {
-        for (msat_term l : primed) {
-            solver_.assume(l);
-        }
+    logger(3) << "[block] preparing assumptions over c' (order preserved), |c'|=" << primed.size() << endlog;
+    for (size_t i = 0; i < primed.size(); ++i) {
+        logger(4) << "  assume c'[" << i << "] term_id=" << msat_term_id(primed[i])
+                  << "  (paired orig term_id=" << msat_term_id(c[i]) << ")" << endlog;
     }
 
-    // temporarily assert ~c
+    if (opts_.seed) {
+        std::vector<size_t> idxs(primed.size());
+        std::iota(idxs.begin(), idxs.end(), 0);
+        shuffle(idxs, rng_);
+        logger(4) << "[block] opts_.seed=true  permutation:";
+        for (size_t j = 0; j < idxs.size(); ++j) logger(4) << " " << idxs[j];
+        logger(4) << endlog;
+        for (size_t i : idxs) solver_.assume(primed[i]);
+    } else {
+        logger(4) << "[block] opts_.seed=false  (natural order assumptions)" << endlog;
+        for (msat_term l : primed) solver_.assume(l);
+    }
+
+    // push + add clause (~c) + solve
+    logger(3) << "[block] solver_.push(); add_cube_as_clause(~c); solve()" << endlog;
     solver_.push();
     solver_.add_cube_as_clause(c);
     bool sat = solve();
-    
-    if (!sat) {
-        // relative induction succeeds. If required (out != NULL), generalize
-        // ~c to a stronger clause, by looking at the literals of c' that occur
-        // in the unsat core. If g' is a subset of c',
-        // then if "~c & F[idx-1] & T & g'" is unsat, then so is
-        // "~g & F[idx-1] & T & g'" (since ~g is stronger than ~c)
-        if (out) {
-            // try minimizing using the unsat core
-            const TermSet &core = solver_.unsat_assumptions();
+    logger(2) << "[block] solve() => " << (sat ? "SAT  (not inductive)" : "UNSAT  (inductive)") << endlog;
 
-            // >>> ONE-LINER: print the explained UNSAT core <<<
-            dump_unsat_core_explained(core);
+    if (!sat) {
+        // UNSAT: relative induction succeeds
+        if (out) {
+            const TermSet &core = solver_.unsat_assumptions();  // core over PRIMED literals
+            logger(3) << "[block] UNSAT core size=" << core.size() << " (over primed literals)" << endlog;
+            if (get_verbosity() >= 4) {
+                for (auto t : core) {
+                    logger(4) << "    core term_id=" << msat_term_id(t) << endlog;
+                }
+            }
 
             Cube &candidate = *out;
             Cube rest;
             candidate.clear();
-            for (size_t i = 0; i < primed.size(); ++i) {
-                msat_term a = primed[i];
-                if (core.find(a) != core.end()) {
-                    candidate.push_back(c[i]);
-                } else {
-                    rest.push_back(c[i]);
-                }
-            }
-            solver_.pop();
 
-            // now candidate is a subset of c that is enough for
-            // "~c & F[idx-1] & T & candidate'" to be unsat.
-            // However, we are not done yet. If candidate intersects the
-            // initial states (i.e. "init & candidate" is sat), then ~candidate
-            // is not inductive relative to F[idx-1], as the base case
-            // fails. We fix this by re-adding back literals until
-            // "init & candidate" is unsat
+            for (size_t i = 0; i < primed.size(); ++i) {
+                bool keep = (core.find(primed[i]) != core.end());
+                logger(4) << "    core-check i=" << i
+                          << " primed_id=" << msat_term_id(primed[i])
+                          << " -> " << (keep ? "KEEP" : "DROP") << endlog;
+                if (keep) candidate.push_back(c[i]);
+                else      rest.push_back(c[i]);
+            }
+
+            logger(2) << "[block] candidate BEFORE ensure_not_initial (|cand|=" << candidate.size() << "): ";
+            logcube(2, candidate); logger(2) << endlog;
+            logger(4) << "[block] rest BEFORE ensure_not_initial (|rest|=" << rest.size() << "): ";
+            logcube(4, rest); logger(4) << endlog;
+
+            solver_.pop();  // end UNSAT scope
+            logger(3) << "[block] solver_.pop()  (UNSAT scope ended)" << endlog;
+
+            logger(3) << "[block] ensure_not_initial(candidate, rest)" << endlog;
             ensure_not_initial(candidate, rest);
+
+            logger(2) << "[block] candidate AFTER ensure_not_initial (|cand|=" << candidate.size() << "): ";
+            logcube(2, candidate); logger(2) << endlog;
         } else {
             solver_.pop();
+            logger(3) << "[block] solver_.pop()  (UNSAT && out==NULL)" << endlog;
         }
-        
+
+        logger(2) << "[block] RETURN: true (UNSAT)" << endlog;
+        logger(2) << "================================================================================" << endlog;
         return true;
     } else {
-        // relative induction fails. If requested, extract a predecessor of c
-        // (i.e. a counterexample to induction - CTI) from the model found by
-        // the SMT solver
+        // SAT: CTI path
         Cube inputs;
         if (compute_cti) {
             assert(out);
             get_cube_from_model(*out, &inputs);
+            logger(2) << "[block] CTI predecessor from model (|out|=" << out->size() << "): ";
+            logcube(2, *out); logger(2) << endlog;
+            if (!inputs.empty()) {
+                logger(4) << "[block] CTI inputs (|inputs|=" << inputs.size() << "): ";
+                logcube(4, inputs); logger(4) << endlog;
+            }
         }
+
         solver_.pop();
+        logger(3) << "[block] solver_.pop()  (SAT path)" << endlog;
+
         if (compute_cti) {
+            size_t before = out->size();
+            logger(3) << "[block] generalize_pre(primed, inputs, out)  before |out|=" << before << endlog;
             generalize_pre(primed, inputs, *out);
+            size_t after = out->size();
+            logger(3) << "[block] generalize_pre done  |out| " << before << " -> " << after << endlog;
         }
-        
+
+        logger(2) << "[block] RETURN: false (SAT" << (compute_cti ? "+CTI" : "") << ")" << endlog;
+        logger(2) << "================================================================================" << endlog;
         return false;
     }
 }

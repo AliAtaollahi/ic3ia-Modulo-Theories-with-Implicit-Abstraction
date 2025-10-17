@@ -147,7 +147,22 @@ private:
             push(po);
             store_.push_back(po);
         }
-        
+
+        std::vector<const ProofObligation*> snapshot() const
+        {
+            Queue copy = queue_;                       // copies by value; safe
+            std::vector<const ProofObligation*> out;
+            out.reserve(copy.size());
+            while (!copy.empty()) {
+                out.push_back(copy.top());
+                copy.pop();
+            }
+            return out;                                // top is out[0]
+        }
+
+        // True runtime size (useful alongside qsize_est logs)
+        size_t debug_size() const { return queue_.size(); }
+
         void push(ProofObligation *p) { queue_.push(p); }
         ProofObligation *top() { return queue_.top(); }
         void pop() { queue_.pop(); }
