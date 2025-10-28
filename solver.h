@@ -76,6 +76,9 @@ public:
     ///< and reinitializing the internal solver state)
 
     bool is_approx() const { return is_approx_; }
+    // Expose current assumptions for debug printing
+    const TermList& assumptions() const { return a_; }
+    msat_env env() const { return env_; }
 
 private:
     void create_env();

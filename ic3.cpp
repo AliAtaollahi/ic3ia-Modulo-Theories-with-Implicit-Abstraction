@@ -25,6 +25,8 @@
 #include <iomanip>
 #include <algorithm>
 #include <vector>
+#include <sstream>
+#include <string>
 
 namespace ic3ia {
 
@@ -277,27 +279,18 @@ inline void IC3::generalize_bad(Cube &c)
     solver_.pop();
 }
 
-
-// ic3.cpp  (UPDATED rec_block only)
-
-// --- in msat_truth_value IC3::rec_block(const Cube &bad) (ic3.cpp) ---
-
 msat_truth_value IC3::rec_block(const Cube &bad)
 {
     TimeKeeper t(rec_block_time_);
-
-    size_t qsize_est = 0;
 
     auto tv2str = [](msat_truth_value s) {
         switch (s) { case MSAT_TRUE: return "MSAT_TRUE";
                      case MSAT_FALSE: return "MSAT_FALSE";
                      default: return "MSAT_UNDEF"; }
     };
-
     auto chain_len = [](const ProofObligation *p) {
         size_t n = 0; while (p) { ++n; p = p->next; } return n;
     };
-
     auto syntactic_blocking_frame = [&](const Cube &c, unsigned int from_idx)->int {
         for (size_t i = from_idx; i < frames_.size(); ++i) {
             Frame &f = frames_[i];
@@ -313,16 +306,15 @@ msat_truth_value IC3::rec_block(const Cube &bad)
 
     ProofQueue queue;
     queue.push_new(bad, depth());
-    qsize_est = 1;
+    size_t qsize_est = 1;
 
     while (!queue.empty()) {
-        // >>> ADDED: full queue dump (top..bottom) at loop entry <<<
+        // Full queue dump (top..bottom), like the Python logger
         if (get_verbosity() >= 4) {
             auto snap = queue.snapshot();
             logger(4) << "[rec_block] queue dump (top..bottom)"
                       << "  size_est=" << qsize_est
-                      << "  real_size=" << snap.size()
-                      << endlog;
+                      << "  real_size=" << snap.size() << endlog;
             for (size_t i = 0; i < snap.size(); ++i) {
                 const ProofObligation *qpo = snap[i];
                 logger(4) << "  [" << i << "]"
@@ -334,9 +326,8 @@ msat_truth_value IC3::rec_block(const Cube &bad)
                 logger(4) << endlog;
             }
         }
-        // <<< END ADDED >>>
 
-        // periodically reset the solver...
+        // periodic solver reset (unchanged)
         if (opts_.solver_reset_interval &&
             num_solve_calls_ - last_reset_calls_ > opts_.solver_reset_interval) {
             logger(3) << "[rec_block] solver reset threshold hit: "
@@ -355,11 +346,9 @@ msat_truth_value IC3::rec_block(const Cube &bad)
         logcube(4, p->cube);
         logger(3) << endlog;
 
-        // ---- frame 0 case (unchanged) ----
         if (p->idx == 0) {
             std::vector<TermList> cex;
-            const ProofObligation *q = p;
-            while (q) { cex.push_back(q->cube); q = q->next; }
+            for (const ProofObligation *q = p; q; q = q->next) cex.push_back(q->cube);
 
             logger(2) << "[rec_block] reached frame 0; "
                       << "candidate CEX length=" << cex.size() << endlog;
@@ -376,25 +365,18 @@ msat_truth_value IC3::rec_block(const Cube &bad)
                       << tv2str(s) << endlog;
 
             if (s == MSAT_TRUE) {
-                logger(3) << "[rec_block] refinement succeeded; "
-                          << "clearing pending proof obligations" << endlog;
-                while (!queue.empty()) { queue.pop(); }
+                while (!queue.empty()) queue.pop();
                 qsize_est = 0;
-
-                // >>> ADDED: show queue is now empty <<<
                 if (get_verbosity() >= 4) {
                     logger(4) << "[rec_block] queue dump (after refine): empty" << endlog;
                 }
-                // <<< END ADDED >>>
             }
             return s;
         }
 
-        // ---- normal step (unchanged logic; minor logs only) ----
         if (!is_blocked(p->cube, p->idx)) {
-            logger(3) << "[rec_block] is_blocked = false; "
-                      << "attempting relative induction:  ~C & F[" << (p->idx-1)
-                      << "] & T |= ~C'  (calling block)" << endlog;
+            logger(3) << "[rec_block] is_blocked = false; attempting relative induction:  ~C & F["
+                      << (p->idx-1) << "] & T |= ~C'  (calling block)" << endlog;
 
             Cube c;
             bool ok = block(p->cube, p->idx, &c, /*compute_cti=*/true);
@@ -421,52 +403,34 @@ msat_truth_value IC3::rec_block(const Cube &bad)
                 add_blocked(c, idx);
 
                 if (idx < depth() && !opts_.stack) {
-                    logger(3) << "[rec_block] scheduling same PO at later step: "
-                              << "from idx=" << p->idx << " to idx=" << (p->idx+1)
-                              << " (optimization)" << endlog;
                     queue.push_new(p->cube, p->idx+1, p->next);
                     ++qsize_est;
-                } else {
-                    logger(3) << "[rec_block] not scheduling later step "
-                              << "(idx==" << idx << " depth()==" << depth()
-                              << ", stack=" << (opts_.stack ? "true" : "false") << ")"
-                              << endlog;
                 }
-
                 queue.pop();
                 --qsize_est;
             } else {
-                logger(3) << "[rec_block] block => SAT. "
-                          << "CTI predecessor size=" << c.size() << " : ";
+                logger(3) << "[rec_block] block => SAT. CTI predecessor size="
+                          << c.size() << " : ";
                 logcube(4, c); logger(3) << endlog;
 
-                logger(3) << "[rec_block] pushing predecessor as new obligation "
-                          << "at idx=" << (p->idx-1) << endlog;
                 queue.push_new(c, p->idx-1, p);
                 ++qsize_est;
             }
         } else {
             int where = syntactic_blocking_frame(p->cube, p->idx);
-            if (where >= 0) {
-                logger(3) << "[rec_block] is_blocked = true; "
-                          << "syntactically subsumed by frame[" << where << "]"
-                          << "  (pop current PO)" << endlog;
-            } else {
-                logger(3) << "[rec_block] is_blocked = true; "
-                          << "semantically blocked (no syntactic subsumer found)"
-                          << "  (pop current PO)" << endlog;
-            }
+            logger(3) << "[rec_block] is_blocked = true; "
+                      << (where >= 0 ? "syntactically subsumed by frame[" +
+                                        std::to_string(where) + "]"
+                                     : "semantically blocked")
+                      << "  (pop current PO)" << endlog;
             queue.pop();
             --qsize_est;
         }
     }
 
-    // >>> ADDED: explicit confirmation the queue is empty when we exit the loop <<<
     if (get_verbosity() >= 4) {
         logger(4) << "[rec_block] queue dump (after loop): empty" << endlog;
     }
-    // <<< END ADDED >>>
-
     logger(2) << "[rec_block] done: queue empty, returning MSAT_TRUE" << endlog;
     return MSAT_TRUE;
 }
@@ -633,6 +597,138 @@ bool IC3::propagate()
     return false;
 }
 
+// ---- helpers for printing terms and model values ----
+static inline std::string smt2(msat_env e, msat_term t)
+{
+    char *c = msat_to_smtlib2_term(e, t);     // MathSAT allocates
+    std::string s = c ? c : "";
+    if (c) { msat_free(c); }
+    return s;
+}
+
+static inline const char *bool_value_str(msat_env e, msat_term v)
+{
+    switch (msat_decl_get_tag(e, msat_term_get_decl(v))) {
+    case MSAT_TAG_TRUE:  return "true";
+    case MSAT_TAG_FALSE: return "false";
+    default:             return nullptr; // non-constant bool
+    }
+}
+
+static inline std::string smt2_term(msat_env e, msat_term t) {
+    if (MSAT_ERROR_TERM(t)) return std::string("<?>");
+    char *c = msat_to_smtlib2_term(e, t);
+    if (!c) return std::string("<print-error>");
+    std::string s(c);
+    msat_free(c);
+    return s;
+}
+
+static inline std::string smt2_any(msat_env e, msat_term t) {
+    if (MSAT_ERROR_TERM(t)) return std::string("<?>");
+    char *c = msat_to_smtlib2_term(e, t);
+    if (!c) {
+        c = msat_to_smtlib2(e, t);
+        if (!c) return std::string("<print-error>");
+    }
+    std::string s(c);
+    msat_free(c);
+    return s;
+}
+
+static inline std::string model_bool_str(msat_env e, msat_term t) {
+    if (MSAT_ERROR_TERM(t)) return std::string("<?>");
+    msat_term mv = msat_get_model_value(e, t);
+    if (MSAT_ERROR_TERM(mv)) return std::string("<?>");
+    auto tag = msat_decl_get_tag(e, msat_term_get_decl(mv));
+    if (tag == MSAT_TAG_TRUE)  return "true";
+    if (tag == MSAT_TAG_FALSE) return "false";
+    return smt2_term(e, mv);
+}
+
+void IC3::dump_full_model() {
+    msat_env env = solver_.env();  // IMPORTANT: use solver's env (owns the model)
+
+    logger(2) << "[model] ===== FULL MODEL DUMP (BEGIN) =====" << endlog;
+
+    // (1) Base (non-Boolean) state variables: numerals (need FULL model gen)
+    for (msat_term v : ts_.statevars()) {
+        msat_type ty = msat_term_get_type(v);
+        if (MSAT_ERROR_TYPE(ty) || msat_is_bool_type(env, ty)) continue;
+        msat_term mv = msat_get_model_value(env, v);
+        logger(2) << "[model] base   " << smt2_any(env, v)
+                  << " = " << smt2_any(env, mv) << endlog;
+    }
+
+    // (2) Boolean labels and their predicates/next
+    for (msat_term l : state_vars_) {
+        std::string lname = smt2_any(env, l);
+        std::string lval  = model_bool_str(env, l);
+
+        auto pit = lbl2pred_.find(l);
+        if (pit != lbl2pred_.end()) {
+            msat_term p = pit->second;
+            logger(2) << "[model] label  " << lname << " = " << lval
+                      << "    (pred: " << smt2_any(env, p)
+                      << " = " << model_bool_str(env, p) << ")"
+                      << endlog;
+        } else {
+            logger(2) << "[model] label  " << lname << " = " << lval << endlog;
+        }
+
+        auto nit = lbl2next_.find(l);
+        if (nit != lbl2next_.end()) {
+            msat_term ln = nit->second;
+            logger(2) << "[model] next   " << smt2_any(env, ln)
+                      << " = " << model_bool_str(env, ln) << endlog;
+        }
+    }
+
+    // (3) Inputs (boolean only)
+    {
+        bool any = false;
+        for (msat_term i : ts_.inputvars()) {
+            if (msat_term_is_boolean_constant(env, i)) {
+                any = true;
+                logger(2) << "[model] input  " << smt2_any(env, i)
+                          << " = " << model_bool_str(env, i) << endlog;
+            }
+        }
+        if (!any) {
+            logger(2) << "[model] input  <none or not boolean>" << endlog;
+        }
+    }
+
+    logger(2) << "[model] ===== FULL MODEL DUMP (END) =====" << endlog;
+}
+
+
+static bool eval_symbol(msat_env env, msat_model mdl, const char* name, std::string &out) {
+    msat_decl d = msat_find_decl(env, name);
+    if (MSAT_ERROR_DECL(d)) return false;                  // symbol not found
+    msat_term sym = msat_make_constant(env, d);
+    msat_term val = msat_model_eval(mdl, sym);             // << correct API
+    if (MSAT_ERROR_TERM(val)) return false;                // model didn't give a value
+    char* raw = msat_to_smtlib2_term(env, val);
+    out = raw ? std::string(raw) : std::string("?");
+    if (raw) msat_free(raw);
+    return true;
+}
+
+static std::string clause_of_negated_cube(msat_env env,
+                                          const std::vector<msat_term> &cube) {
+    if (cube.empty()) return "false";
+    std::ostringstream oss;
+    oss << "(or";
+    for (msat_term l : cube) {
+        const bool is_not = msat_term_is_not(env, l);
+        msat_term v      = is_not ? msat_term_get_arg(l, 0) : l;  // literal variable
+        msat_term comp   = is_not ? v : msat_make_not(env, v);    // complement to form ~literal
+        oss << " " << smt2(env, comp);
+    }
+    oss << ")";
+    return oss.str();
+}
 
 bool IC3::block(const Cube &c, unsigned int idx, Cube *out, bool compute_cti)
 {
@@ -640,6 +736,7 @@ bool IC3::block(const Cube &c, unsigned int idx, Cube *out, bool compute_cti)
     ++num_block_;
     assert(idx > 0);
 
+    logger(2) << "\n------------------------------------------------------\nturn " << turn++ << "\n";
     logger(2) << "================================================================================" << endlog;
     logger(2) << "[block] ENTER  idx=" << idx
               << "  compute_cti=" << (compute_cti ? "true" : "false")
@@ -649,67 +746,106 @@ bool IC3::block(const Cube &c, unsigned int idx, Cube *out, bool compute_cti)
     logger(2) << "[block] input cube: ";
     logcube(2, c); logger(2) << endlog;
 
-    // activate F[idx-1] & T
+    // F[idx-1] & T (adds assumptions inside)
     logger(3) << "[block] activate_frame(" << (idx-1) << "), activate_trans()" << endlog;
     activate_frame(idx-1);
     activate_trans();
 
     // c' (primed) in the same order as c
     Cube primed = get_next(c);
-    logger(3) << "[block] preparing assumptions over c' (order preserved), |c'|=" << primed.size() << endlog;
+    logger(3) << "[block] preparing assumptions over c' (order preserved), |c'|="
+              << primed.size() << endlog;
+
+    std::vector<msat_term> primed_assumptions;
+    primed_assumptions.reserve(primed.size());
     for (size_t i = 0; i < primed.size(); ++i) {
         logger(4) << "  assume c'[" << i << "] term_id=" << msat_term_id(primed[i])
                   << "  (paired orig term_id=" << msat_term_id(c[i]) << ")" << endlog;
+        solver_.assume(primed[i]);
+        primed_assumptions.push_back(primed[i]);
     }
-
-    if (opts_.seed) {
-        std::vector<size_t> idxs(primed.size());
-        std::iota(idxs.begin(), idxs.end(), 0);
-        shuffle(idxs, rng_);
-        logger(4) << "[block] opts_.seed=true  permutation:";
-        for (size_t j = 0; j < idxs.size(); ++j) logger(4) << " " << idxs[j];
-        logger(4) << endlog;
-        for (size_t i : idxs) solver_.assume(primed[i]);
-    } else {
+    if (!opts_.seed) {
         logger(4) << "[block] opts_.seed=false  (natural order assumptions)" << endlog;
-        for (msat_term l : primed) solver_.assume(l);
     }
 
-    // push + add clause (~c) + solve
+    // Start a SAT scope; assert the single clause (~c)
     logger(3) << "[block] solver_.push(); add_cube_as_clause(~c); solve()" << endlog;
     solver_.push();
     solver_.add_cube_as_clause(c);
+
+    // ---------- Python-like [block.pre] dump ----------
+    std::vector<msat_term> all_as;
+    all_as.reserve(frame_labels_.size() + 2 + primed_assumptions.size());
+
+    // frames (activate_frame(idx-1) => assume(not frame_label[k]) for k<idx-1, POS otherwise)
+    for (size_t k = 0; k < frame_labels_.size(); ++k) {
+        msat_term a = lit(frame_labels_[k], k < (idx - 1));
+        all_as.push_back(a);
+    }
+    // trans/bad (activate_trans() => trans POS, bad NOT)
+    all_as.push_back(lit(trans_label_, false));
+    all_as.push_back(lit(bad_label_,   true));
+
+    // c' assumptions we just added
+    all_as.insert(all_as.end(), primed_assumptions.begin(), primed_assumptions.end());
+
+    logger(3) << "[block.pre] assumptions.count = " << all_as.size() << endlog;
+    for (size_t i = 0; i < all_as.size(); ++i) {
+        logger(3) << "[block.pre]  A[" << i << "] term_id=" << msat_term_id(all_as[i])
+                  << "  " << logterm(all_as[i]) << endlog;
+    }
+
+    // Show the exact "~c" clause asserted in this temporary scope
+    logger(3) << "[block.pre] asserted ~c clause: "
+              << clause_of_negated_cube(ts_.get_env(), c) << endlog;
+
+    // Frames / names
+    logger(4) << "[block.pre] frames:" << endlog;
+    for (size_t k = 0; k < frame_labels_.size(); ++k) {
+        bool neg = (k < (idx - 1));
+        logger(4) << "    frame[" << k << "]: term_id=" << msat_term_id(frame_labels_[k])
+                  << "  assumed=" << (neg ? "NOT" : "POS")
+                  << "  name=" << logterm(frame_labels_[k]) << endlog;
+    }
+    logger(4) << "[block.pre] trans/bad:" << endlog;
+    logger(4) << "    trans term_id=" << msat_term_id(trans_label_)
+              << "  assumed=POS  name=" << logterm(trans_label_) << endlog;
+    logger(4) << "    bad   term_id=" << msat_term_id(bad_label_)
+              << "  assumed=NOT  name=" << logterm(bad_label_)   << endlog;
+
+    // c' again, as in python
+    logger(4) << "[block.pre] c' (order preserved), |c'|=" << primed_assumptions.size() << endlog;
+    for (size_t i = 0; i < primed_assumptions.size(); ++i) {
+        logger(4) << "    c'[" << i << "]: term_id=" << msat_term_id(primed_assumptions[i])
+                  << "  (paired orig term_id=" << msat_term_id(c[i]) << ")" << endlog;
+    }
+
+    logger(3) << "[block.pre] INPUT cube c (will assert clause(~c) in this scope): ";
+    logcube(3, c); logger(3) << endlog;
+    // --------------------------------------------------
+
+    // Solve
     bool sat = solve();
     logger(2) << "[block] solve() => " << (sat ? "SAT  (not inductive)" : "UNSAT  (inductive)") << endlog;
 
     if (!sat) {
-        // UNSAT: relative induction succeeds
+        // UNSAT: relative induction succeeded
         if (out) {
-            const TermSet &core = solver_.unsat_assumptions();  // core over PRIMED literals
-            logger(3) << "[block] UNSAT core size=" << core.size() << " (over primed literals)" << endlog;
-            if (get_verbosity() >= 4) {
-                for (auto t : core) {
-                    logger(4) << "    core term_id=" << msat_term_id(t) << endlog;
-                }
-            }
+            const TermSet &core = solver_.unsat_assumptions();  // core over primed lits
+            logger(3) << "[block] UNSAT core size=" << core.size()
+                      << " (over primed literals)" << endlog;
 
             Cube &candidate = *out;
             Cube rest;
             candidate.clear();
-
             for (size_t i = 0; i < primed.size(); ++i) {
-                bool keep = (core.find(primed[i]) != core.end());
-                logger(4) << "    core-check i=" << i
-                          << " primed_id=" << msat_term_id(primed[i])
-                          << " -> " << (keep ? "KEEP" : "DROP") << endlog;
-                if (keep) candidate.push_back(c[i]);
-                else      rest.push_back(c[i]);
+                if (core.find(primed[i]) != core.end()) candidate.push_back(c[i]);
+                else                                     rest.push_back(c[i]);
             }
 
-            logger(2) << "[block] candidate BEFORE ensure_not_initial (|cand|=" << candidate.size() << "): ";
+            logger(2) << "[block] candidate BEFORE ensure_not_initial (|cand|="
+                      << candidate.size() << "): ";
             logcube(2, candidate); logger(2) << endlog;
-            logger(4) << "[block] rest BEFORE ensure_not_initial (|rest|=" << rest.size() << "): ";
-            logcube(4, rest); logger(4) << endlog;
 
             solver_.pop();  // end UNSAT scope
             logger(3) << "[block] solver_.pop()  (UNSAT scope ended)" << endlog;
@@ -717,7 +853,8 @@ bool IC3::block(const Cube &c, unsigned int idx, Cube *out, bool compute_cti)
             logger(3) << "[block] ensure_not_initial(candidate, rest)" << endlog;
             ensure_not_initial(candidate, rest);
 
-            logger(2) << "[block] candidate AFTER ensure_not_initial (|cand|=" << candidate.size() << "): ";
+            logger(2) << "[block] candidate AFTER ensure_not_initial (|cand|="
+                      << candidate.size() << "): ";
             logcube(2, candidate); logger(2) << endlog;
         } else {
             solver_.pop();
@@ -728,7 +865,7 @@ bool IC3::block(const Cube &c, unsigned int idx, Cube *out, bool compute_cti)
         logger(2) << "================================================================================" << endlog;
         return true;
     } else {
-        // SAT: CTI path
+        // SAT: build CTI predecessor (and optional inputs)
         Cube inputs;
         if (compute_cti) {
             assert(out);
@@ -746,7 +883,8 @@ bool IC3::block(const Cube &c, unsigned int idx, Cube *out, bool compute_cti)
 
         if (compute_cti) {
             size_t before = out->size();
-            logger(3) << "[block] generalize_pre(primed, inputs, out)  before |out|=" << before << endlog;
+            logger(3) << "[block] generalize_pre(primed, inputs, out)  before |out|="
+                      << before << endlog;
             generalize_pre(primed, inputs, *out);
             size_t after = out->size();
             logger(3) << "[block] generalize_pre done  |out| " << before << " -> " << after << endlog;
@@ -1165,16 +1303,117 @@ IC3::Cube IC3::get_next(const Cube &c)
     return ret;
 }
 
+static std::string eval_smt2(msat_env env, msat_model mdl, msat_term t) {
+    msat_term val = msat_model_eval(mdl, t);
+    char *raw = msat_to_smtlib2_term(env, val);
+    std::string out = raw ? std::string(raw) : std::string();
+    if (raw) msat_free(raw);
+    return out;
+}
+
+// Return the SMT-LIB2 rendering of the current model value of term t
+static std::string value_smt2(msat_env env, msat_term t) {
+    msat_term val = msat_get_model_value(env, t);
+    char *raw = msat_to_smtlib2_term(env, val);
+    std::string out = raw ? std::string(raw) : std::string();
+    if (raw) msat_free(raw);
+    return out;
+}
+
+static bool try_value_smt2(msat_env env, msat_term t, std::string &out) {
+    msat_term val = msat_get_model_value(env, t);
+    // Guard against invalid/error terms (defensive: treat non-positive ids as invalid)
+    int vid = msat_term_id(val);
+    if (vid <= 0) return false;
+
+    char *raw = msat_to_smtlib2_term(env, val);
+    if (!raw) return false;
+    out.assign(raw);
+    msat_free(raw);
+    return true;
+}
+
+static inline std::string smt2_int(int k) {
+    if (k < 0) {
+        return "(- " + std::to_string(-k) + ")";
+    }
+    return std::to_string(k);
+}
+
+static bool probe_small_int(msat_env env,
+                            ic3ia::Solver &solver,
+                            msat_term v,
+                            int lo, int hi,
+                            std::string &out_s)
+{
+    // only makes sense for non-Boolean terms
+    if (msat_term_is_boolean_constant(env, v)) return false;
+
+    for (int k = lo; k <= hi; ++k) {
+        msat_term kn = msat_make_number(env, std::to_string(k).c_str());
+        msat_term eq = msat_make_equal(env, v, kn);   // (v = k)
+        // Ask the model for the truth value of this Boolean atom.
+        // This path is known-safe in your codebase.
+        bool is_true = solver.model_value(eq);
+        if (is_true) {
+            out_s = smt2_int(k);
+            return true;
+        }
+    }
+    return false;
+}
+
 
 void IC3::get_cube_from_model(Cube &out, Cube *inputs)
 {
     out.clear();
+
+    logger(2) << "[get_cube_from_model] BEGIN" << endlog;
+
+    // (A) Assumptions
+    {
+        const TermList &A = solver_.assumptions();
+        logger(2) << "[get_cube_from_model] assumptions.count = " << A.size() << endlog;
+        if (!A.empty()) {
+            msat_env env = solver_.env();  // use solver env
+            for (std::size_t i = 0; i < A.size(); ++i) {
+                msat_term a = A[i];
+                logger(2) << "[get_cube_from_model]  A[" << i
+                          << "] term_id=" << msat_term_id(a)
+                          << "  " << smt2_any(env, a) << endlog;
+            }
+        }
+    }
+
+    // (B) One-line numerals (non-Boolean state vars)
+    {
+        msat_env env = solver_.env();  // use solver env
+        std::ostringstream oss;
+        bool any = false;
+        for (msat_term v : ts_.statevars()) {
+            msat_type ty = msat_term_get_type(v);
+            if (MSAT_ERROR_TYPE(ty) || msat_is_bool_type(env, ty)) continue;
+            if (any) oss << ", ";
+            any = true;
+            msat_term mv = msat_get_model_value(env, v);
+            oss << smt2_any(env, v) << "=" << smt2_any(env, mv);
+        }
+        if (any) {
+            logger(2) << "[get_cube_from_model] numerals: " << oss.str() << endlog;
+        }
+    }
+
+    // (C) Full model dump
+    dump_full_model();
+
+    // --- original behavior: build predecessor cube from labels ---
     for (msat_term v : state_vars_) {
         out.push_back(lit(v, !solver_.model_value(v)));
     }
     std::sort(out.begin(), out.end());
+
     if (inputs) {
-        auto env = ts_.get_env();
+        msat_env env = solver_.env();  // use solver env
         for (auto i : ts_.inputvars()) {
             if (msat_term_is_boolean_constant(env, i)) {
                 inputs->push_back(lit(i, !solver_.model_value(i)));
@@ -1456,18 +1695,23 @@ int IC3::frame_index_of_label(msat_term v) {
   return -1;
 }
 
-void IC3::dump_assumptions(const std::vector<msat_term>& as) {
-  logger(3) << "  assumptions:" << endlog;
+void IC3::dump_assumptions(const std::vector<msat_term> &as)
+{
+    logger(3) << "[block.pre] assumptions.count = " << as.size() << endlog;
+    for (size_t i = 0; i < as.size(); ++i) {
+        logger(3) << "[block.pre]  A[" << i << "] term_id=" << msat_term_id(as[i])
+                  << "  " << logterm(as[i]) << endlog;
+    }
 }
 
-void IC3::dump_unsat_core_explained(const TermSet& core) {
-  if (core.empty()) {
-    logger(3) << "  UNSAT core: <empty>" << endlog;
-    return;
-  }
-  std::vector<msat_term> items(core.begin(), core.end());
-  std::sort(items.begin(), items.end(),
-            [](msat_term a, msat_term b){ return msat_term_id(a) < msat_term_id(b); });
+void IC3::dump_unsat_core_explained(const TermSet &core)
+{
+    logger(4) << "[block] UNSAT core explained (primed literals):" << endlog;
+    for (msat_term t : core) {
+        logger(4) << "    core term_id=" << msat_term_id(t)
+                  << "  " << logterm(t) << endlog;
+    }
 }
+
 
 } // namespace ic3ia

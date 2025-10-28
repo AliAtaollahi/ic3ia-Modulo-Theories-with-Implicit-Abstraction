@@ -44,7 +44,7 @@ Solver::~Solver()
 
 void Solver::create_env()
 {
-    msat_config cfg = get_config(BOOL_MODEL, false, is_approx_);
+    msat_config cfg = get_config(FULL_MODEL, false, is_approx_);
     if (!trace_.empty()) {
         auto name = trace_ + (is_approx_ ? ".approx" : "") + ".main.smt2";
         msat_set_option(cfg, "debug.api_call_trace", "1");
@@ -123,10 +123,61 @@ void Solver::assume(msat_term a)
 }
 
 
+static inline std::string msat_smt2_term_safe(msat_env e, msat_term t) {
+    if (MSAT_ERROR_TERM(t)) return std::string("<?>");
+    char *c = msat_to_smtlib2_term(e, t);  // must free via msat_free()
+    if (!c) return std::string("<print-error>");
+    std::string s(c);
+    msat_free(c);
+    return s;
+}
+
+// ... inside namespace ic3ia ... (your Solver method)
 bool Solver::check()
 {
     uc_.clear();
-    msat_result res = msat_solve_with_assumptions(env_, &a_[0], a_.size());
+
+    // ---- DEBUG: log everything passed to msat_solve_with_assumptions ----
+    {
+        logger(2) << "[solve] msat_solve_with_assumptions BEGIN" << endlog;
+
+        // msat_env is a wrapper struct; print its internal pointer
+        logger(3) << "[solve]   env.repr=" << env_.repr << endlog;  // FIX
+
+        const size_t n = a_.size();
+        logger(3) << "[solve]   assumptions.count = " << n << endlog;
+
+        for (size_t i = 0; i < n; ++i) {
+            msat_term ai = a_[i];
+            logger(3) << "[solve]     A[" << i << "] term_id=" << msat_term_id(ai)
+                      << "  " << msat_smt2_term_safe(env_, ai) << endlog;
+        }
+
+        if (n == 0) {
+            logger(4) << "[solve]   (passing nullptr, 0)" << endlog;
+        } else {
+            // (optional) show the raw pointer & count we pass
+            msat_term *ptr = &a_[0];
+            logger(4) << "[solve]   ptr=" << static_cast<const void*>(ptr)
+                      << "  size=" << n << endlog;
+        }
+    }
+    // --------------------------------------------------------------------
+
+    // IMPORTANT: avoid UB when a_ is empty; pass nullptr with count 0
+    msat_term *ptr = a_.empty() ? nullptr : &a_[0];
+
+    // MathSAT call (this creates/uses the current model on env_) 
+    // API: msat_result msat_solve_with_assumptions(msat_env, msat_term*, size_t)
+    msat_result res = msat_solve_with_assumptions(env_, ptr, a_.size());  // :contentReference[oaicite:1]{index=1}
+
+    logger(2) << "[solve]   result = "
+              << (res == MSAT_SAT ? "MSAT_SAT"
+                  : res == MSAT_UNSAT ? "MSAT_UNSAT"
+                  : "MSAT_UNKNOWN")
+              << endlog;
+    logger(2) << "[solve] msat_solve_with_assumptions END" << endlog;
+
     assert(res != MSAT_UNKNOWN);
     a_.clear();
     return (res == MSAT_SAT);

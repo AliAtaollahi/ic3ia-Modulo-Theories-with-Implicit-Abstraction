@@ -29,7 +29,7 @@
 #include "live.h"
 #include <queue>
 #include <random>
-
+#include <vector>
 
 namespace ic3ia {
 
@@ -63,15 +63,48 @@ public:
     ///< holds (in this case, each element of the vector is a clause that is
     ///< part of the invariant)
 
-    void print_stats(std::ostream &out) const;
-    ///< print search statistics on out
-    
+    // Print stats (matches the definition you already have in ic3.cpp)
+    void print_stats(std::ostream &out) const override;
+
+    // Enable/disable extra block() SAT-instance dump. 
+    // only_idx: dump only when block() is called with that idx (-1 = all).
+    // show_frame_clauses is kept for API parity; we don't enumerate frames here.
+    void enable_block_sat_dump(bool enable = true,
+                            int  only_idx = -1,
+                            bool show_frame_clauses = false)
+    {
+        debug_block_dump_ = enable;
+        debug_block_only_idx_ = only_idx;
+        debug_block_show_frame_clauses_ = show_frame_clauses;
+    }
+
+    // --- add in ic3.h (inside class IC3) ---
+    // Python-style dump used from block(), propagate(), etc.
+    // using Cube = TermList; 
+
+    // Remember the last "bad" cube (for dumping)
+    // void remember_last_bad_cube(const Cube& c);
+    void dump_assumptions(const std::vector<msat_term>& as);
+    void dump_unsat_core_explained(const TermSet& core);
+    void dump_base_var_numerals_from_model();
+    void dump_full_model();
 private:
+    // Cube last_bad_cube_;
+    bool have_last_bad_ = false;
+    int turn = 1;
+    // Debug flags for block() SAT-instance dump
+    bool debug_block_dump_ = false;
+    int  debug_block_only_idx_ = -1;      // -1 = all idx
+    bool debug_block_show_frame_clauses_ = false;
+
+    // Debug dumper: use std::vector so we don't depend on where 'Cube' is typedef'd
+    void dump_block_instance(const std::vector<msat_term> &c,
+                            const std::vector<msat_term> &primed,
+                            unsigned idx);
+
     // add/keep once in IC3 (private is fine)
     int  frame_index_of_label(msat_term v);
     void explain_label(msat_term lit);
-    void dump_assumptions(const std::vector<msat_term>& as);
-    void dump_unsat_core_explained(const TermSet& core);
     // map .pred_next.K -> .pred.K (filled in add_pred)
     // --- hash & equality for msat_term (needed by unordered_map) ---
     struct MsatTermHash {
@@ -118,7 +151,24 @@ private:
             cube(c), idx(t), next(n) {}
 
         bool operator<(const ProofObligation &other) const
-        { return idx < other.idx; }
+        {
+            auto chain_len = [](const ProofObligation *p) {
+                size_t n = 0; while (p) { ++n; p = p->next; } return n;
+            };
+            if (idx != other.idx)
+                return idx < other.idx;
+            
+            if (cube.size() != other.cube.size())
+                return cube.size() < other.cube.size();
+            
+            size_t chain_len_this = chain_len(this);
+            size_t chain_len_other = chain_len(&other);
+            if (chain_len_this != chain_len_other)
+                return chain_len_this < chain_len_other;
+
+
+            return false;
+        }
     };
 
     /**

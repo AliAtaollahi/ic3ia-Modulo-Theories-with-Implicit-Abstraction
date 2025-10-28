@@ -1,0 +1,41 @@
+default:
+  image: braghieri/estools:Ubuntu20
+
+variables:
+  MathsatFileName: "mathsat-5.6.6-linux-x86_64"
+
+stages:
+  - setup_environment
+  - build
+
+
+download_dependencies_job:
+    only:
+      refs:
+        - master
+    stage: setup_environment
+    script:
+      - echo "Downloading mathsat5"
+      - wget https://mathsat.fbk.eu/download.php?file=${MathsatFileName}.tar.gz -O mathsat.tar.gz
+      - tar xvf mathsat.tar.gz
+      - mv ${MathsatFileName} mathsat
+    artifacts:
+      paths:
+      - mathsat
+
+build_tools_job:
+  only:
+      refs:
+        - master
+  stage: build
+  script:
+    - echo "Building tool(s) $Tool"
+    - mkdir build
+    - cd build
+    - cmake .. -DMATHSAT_DIR=$CI_PROJECT_DIR/mathsat -DCMAKE_BUILD_TYPE=Release -DBUILD_STATIC=1
+    - make
+  artifacts:
+      paths:
+      - build/ic3ia
+      - build/horn2vmt  
+
